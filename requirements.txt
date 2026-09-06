@@ -4,3 +4,6 @@ pymupdf
 sentence-transformers
 faiss-cpu
 ollama
+requests
+beautifulsoup4
+lxml

@@ -1,152 +1,144 @@
-from sentence_transformers import SentenceTransformer
+from pathlib import Path
+import json
+
 import faiss
+import numpy as np
+from sentence_transformers import SentenceTransformer
 import ollama
 
-# -----------------------------
-# 1. Load embedding model
-# -----------------------------
 
-MODEL_PATH = "./models/bge-small-en-v1.5"
+INDEX_FILE = Path("data/vector_db/rice.index")
+METADATA_FILE = Path("data/embeddings/rice_metadata.json")
+MODEL_PATH = Path("models/bge-small-en-v1.5")
 
-embedding_model = SentenceTransformer(MODEL_PATH)
-
-
-# -----------------------------
-# 2. Our knowledge base
-# -----------------------------
-
-texts = [
-    "Soil moisture is an important parameter in precision agriculture. "
-    "A soil moisture sensor measures the amount of water present in soil.",
-
-    "When soil moisture is too low, plants may experience water stress. "
-    "When soil moisture is sufficient, irrigation may not be necessary.",
-
-    "Automated irrigation systems can use soil moisture sensor readings "
-    "to decide when irrigation should be activated.",
-
-    "Different crops require different soil moisture levels. "
-    "Irrigation decisions should consider crop type, soil type, "
-    "weather conditions, and current soil moisture.",
-
-    "Excessive irrigation can waste water and may cause waterlogging "
-    "and nutrient leaching."
-]
+TOP_K = 3
+MIN_CHUNK_LENGTH = 100
 
 
-# -----------------------------
-# 3. Create embeddings
-# -----------------------------
+print("Loading embedding model...")
+model = SentenceTransformer(str(MODEL_PATH))
 
-embeddings = embedding_model.encode(
-    texts,
-    normalize_embeddings=True
-)
+print("Loading FAISS index...")
+index = faiss.read_index(str(INDEX_FILE))
 
-print("Embeddings created:", embeddings.shape)
+print("Loading metadata...")
+with METADATA_FILE.open("r", encoding="utf-8") as file:
+    metadata = json.load(file)
 
-
-# -----------------------------
-# 4. Create FAISS index
-# -----------------------------
-
-dimension = embeddings.shape[1]
-
-index = faiss.IndexFlatIP(dimension)
-
-index.add(embeddings.astype("float32"))
-
-print("FAISS index contains:", index.ntotal, "documents")
+print("RAG system ready.")
 
 
-# -----------------------------
-# 5. Ask a question
-# -----------------------------
+def retrieve(query, top_k=TOP_K):
 
-question = input("\nAsk something: ")
+    query_embedding = model.encode(
+        [query],
+        normalize_embeddings=True,
+        convert_to_numpy=True
+    )
+
+    query_embedding = np.asarray(
+        query_embedding,
+        dtype="float32"
+    )
+
+    scores, indices = index.search(
+        query_embedding,
+        top_k + 5
+    )
+
+    results = []
+
+    for score, idx in zip(scores[0], indices[0]):
+
+        if idx == -1:
+            continue
+
+        chunk = metadata[idx]
+
+        if len(chunk["text"]) < MIN_CHUNK_LENGTH:
+            continue
+
+        results.append({
+            "score": float(score),
+            "chunk_id": chunk["chunk_id"],
+            "source": chunk["source"],
+            "section": chunk["section"],
+            "text": chunk["text"]
+        })
+
+        if len(results) >= top_k:
+            break
+
+    return results
 
 
-# -----------------------------
-# 6. Embed the question
-# -----------------------------
+def generate_answer(query, results):
 
-question_embedding = embedding_model.encode(
-    [question],
-    normalize_embeddings=True
-)
+    context_parts = []
 
-question_embedding = question_embedding.astype("float32")
+    for result in results:
+        context_parts.append(
+            f"Source: {result['source']}\n"
+            f"Section: {result['section']}\n"
+            f"Content: {result['text']}"
+        )
 
+    context = "\n\n".join(context_parts)
 
-# -----------------------------
-# 7. Search FAISS
-# -----------------------------
+    prompt = f"""
+You are an agriculture assistant specializing in rice cultivation.
 
-k = 3
+Answer the user's question using ONLY the provided agriculture knowledge.
 
-scores, indices = index.search(
-    question_embedding,
-    k
-)
+If the provided knowledge does not contain enough information to answer,
+say that the available knowledge is insufficient.
 
-print("\nRetrieved context:")
+Do not invent agricultural recommendations.
 
-retrieved_texts = []
-
-for i, score in zip(indices[0], scores[0]):
-
-    if i != -1:
-        print(f"\nScore: {score:.4f}")
-        print(texts[i])
-
-        retrieved_texts.append(texts[i])
-
-
-# -----------------------------
-# 8. Build prompt
-# -----------------------------
-
-context = "\n\n".join(retrieved_texts)
-
-prompt = f"""
-You are an agriculture assistant.
-
-Answer the user's question using ONLY the provided context.
-
-If the answer cannot be found in the context, say:
-"I don't have enough information in the provided knowledge base."
-
-Context:
+Agriculture knowledge:
 {context}
 
 User question:
-{question}
+{query}
 
-Answer:
+Answer clearly and practically.
 """
 
+    response = ollama.chat(
+        model="lfm2.5-thinking:1.2b",
+        messages=[
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+    )
 
-# -----------------------------
-# 9. Send context to LFM
-# -----------------------------
-
-response = ollama.chat(
-    model="lfm2.5-thinking:1.2b",
-    messages=[
-        {
-            "role": "user",
-            "content": prompt
-        }
-    ]
-)
+    return response["message"]["content"]
 
 
-# -----------------------------
-# 10. Display answer
-# -----------------------------
+if __name__ == "__main__":
 
-print("\n==============================")
-print("LFM2.5 ANSWER")
-print("==============================")
+    query = input("\nAsk an agriculture question: ")
 
-print(response["message"]["content"])
+    results = retrieve(query)
+
+    print("\nGenerating answer...\n")
+
+    answer = generate_answer(query, results)
+
+    print("=" * 60)
+    print("ANSWER")
+    print("=" * 60)
+    print(answer)
+
+    print("\n" + "=" * 60)
+    print("SOURCES USED")
+    print("=" * 60)
+
+    for result in results:
+        print(
+            f"- {result['chunk_id']} | "
+            f"{result['source']} | "
+            f"{result['section']}"
+        )
