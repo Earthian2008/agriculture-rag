@@ -11,6 +11,7 @@ METADATA_FILE = Path("data/embeddings/rice_metadata.json")
 MODEL_PATH = Path("models/bge-small-en-v1.5")
 
 TOP_K = 5                     # changed from 3 to 5
+CANDIDATE_K = 10
 MIN_CHUNK_LENGTH = 100        # new constant
 
 
@@ -40,7 +41,7 @@ def retrieve(query, top_k=TOP_K):
         dtype="float32"
     )
 
-    scores, indices = index.search(query_embedding, top_k)
+    scores, indices = index.search(query_embedding, CANDIDATE_K)
 
     results = []
 
